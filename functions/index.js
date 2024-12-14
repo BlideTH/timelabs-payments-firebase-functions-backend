@@ -5,11 +5,15 @@ const admin = require('firebase-admin');
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 
+
 // Initialize Firebase Admin SDK
 const serviceAccount = require('./keys/serviceAccountKey.json');
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
+
+const { getFirestore } = require('firebase-admin/firestore');
+const db = admin.firestore();
 
 // Use environment variable for bot token
 const botToken = functions.config().telegram.bot_token;
@@ -101,20 +105,26 @@ exports.webhook = functions.https.onRequest((req, res) => {
     const paymentInfo = update.message.successful_payment;
     console.log('Payment received:', paymentInfo);
 
-    // Generate the receipt
-    const receiptData = {
-      title: paymentInfo.invoice_payload,
-      amount: paymentInfo.total_amount / 100,
-      currency: paymentInfo.currency,
-      date: new Date(),
+    // Emit payment signal to Firestore
+    const signalData = {
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'paid',
+      receipt: {
+        title: paymentInfo.invoice_payload,
+        amount: paymentInfo.total_amount / 100,
+        currency: paymentInfo.currency,
+      },
+      chat_id: update.message.chat.id,
     };
 
-    generateReceipt(receiptData);
+    db.collection('paymentSignals').add(signalData)
+      .then(() => console.log('Payment signal added to Firestore'))
+      .catch((error) => console.error('Error writing to Firestore:', error));
   }
 
-  // Acknowledge receipt of the webhook update
   res.status(200).send('Webhook received');
 });
+
 
 // Function to generate a receipt as a PDF
 function generateReceipt(receiptData) {
