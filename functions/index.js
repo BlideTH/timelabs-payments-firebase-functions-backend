@@ -2,9 +2,6 @@ const functions = require('firebase-functions');
 const axios = require('axios');
 const cors = require('cors')({ origin: true });
 const admin = require('firebase-admin');
-const PDFDocument = require('pdfkit');
-const fs = require('fs');
-
 
 // Initialize Firebase Admin SDK
 const serviceAccount = require('./keys/serviceAccountKey.json');
@@ -12,17 +9,12 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-const { getFirestore } = require('firebase-admin/firestore');
 const db = admin.firestore();
-
-// Use environment variable for bot token
 const botToken = functions.config().telegram.bot_token;
 
 // Cloud function to handle creating invoice links
 exports.createInvoiceLink = functions.https.onRequest((req, res) => {
   cors(req, res, async () => {
-    console.log('Incoming request payload:', req.body);
-
     const {
       title,
       description,
@@ -31,6 +23,12 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
       currency,
       prices,
     } = req.body;
+
+    // Validate input
+    if (!title || !description || !payload || !provider_token || !currency || !prices) {
+      console.error('Missing required fields in request body:', req.body);
+      return res.status(400).json({ message: 'Missing required fields in request body.' });
+    }
 
     const createInvoiceLinkUrl = `https://api.telegram.org/bot${botToken}/createInvoiceLink`;
 
@@ -54,94 +52,85 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
       });
 
       if (response.data.ok) {
+        const invoiceLink = response.data.result;
+
         console.log('Telegram API response:', response.data);
 
         res.status(200).json({
           message: 'Invoice link created successfully',
-          invoice_link: response.data.result,
+          invoice_link: invoiceLink,
         });
       } else {
-        console.error('Telegram API error:', response.data.description);
-        res.status(500).send(response.data.description);
+        console.error('Telegram API error:', {
+          status: response.status,
+          data: response.data,
+        });
+        res.status(500).json({ message: response.data.description });
       }
     } catch (error) {
       console.error('Error creating invoice link:', error.message);
-      res.status(500).send('Failed to create invoice link.');
+      res.status(500).json({ message: 'Failed to create invoice link.' });
     }
   });
 });
 
+
+
+
+
 // Cloud function to handle webhook updates from Telegram
-exports.webhook = functions.https.onRequest((req, res) => {
+exports.webhook = functions.https.onRequest(async (req, res) => {
   const update = req.body;
 
   console.log('Received webhook update:', JSON.stringify(update, null, 2));
 
-  // Handle pre-checkout query
   if (update.pre_checkout_query) {
     const preCheckoutQuery = update.pre_checkout_query;
 
     console.log('Pre-checkout query received:', preCheckoutQuery);
 
     try {
-      axios
-        .post(`https://api.telegram.org/bot${botToken}/answerPreCheckoutQuery`, {
+      await axios.post(
+        `https://api.telegram.org/bot${botToken}/answerPreCheckoutQuery`,
+        {
           pre_checkout_query_id: preCheckoutQuery.id,
           ok: true,
-        })
-        .then(() => {
-          console.log('Pre-checkout query answered successfully');
-        })
-        .catch((error) => {
-          console.error('Error answering pre-checkout query:', error.message);
-        });
+        }
+      );
+      console.log('Pre-checkout query answered successfully');
     } catch (error) {
-      console.error('Error processing pre-checkout query:', error.message);
+      console.error('Error answering pre-checkout query:', error.message);
     }
   }
 
-  // Handle successful payment
   if (update.message?.successful_payment) {
     const paymentInfo = update.message.successful_payment;
-    console.log('Payment received:', paymentInfo);
+    const chatId = update.message.chat.id;
 
-    // Emit payment signal to Firestore
-    const signalData = {
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+    if (!paymentInfo || !chatId) {
+      console.error('Missing payment information or chat ID:', update.message);
+      return res.status(400).send('Missing payment information or chat ID.');
+    }
+
+    const signal = {
+      chat_id: chatId,
       status: 'paid',
-      receipt: {
-        title: paymentInfo.invoice_payload,
-        amount: paymentInfo.total_amount / 100,
-        currency: paymentInfo.currency,
-      },
-      chat_id: update.message.chat.id,
+      amount: paymentInfo.total_amount / 100,
+      currency: paymentInfo.currency,
+      date: new Date(),
     };
 
-    db.collection('paymentSignals').add(signalData)
-      .then(() => console.log('Payment signal added to Firestore'))
-      .catch((error) => console.error('Error writing to Firestore:', error));
+    try {
+      await db.collection('paymentSignals').add(signal);
+      console.log('Payment signal written to Firestore:', signal);
+    } catch (error) {
+      console.error('Error writing payment signal to Firestore:', error.message);
+    }
   }
 
   res.status(200).send('Webhook received');
 });
 
 
-// Function to generate a receipt as a PDF
-function generateReceipt(receiptData) {
-  const doc = new PDFDocument();
-  const filePath = `/tmp/receipt-${Date.now()}.pdf`;
 
-  // Create the PDF
-  doc.pipe(fs.createWriteStream(filePath));
-  doc.fontSize(18).text('Receipt', { align: 'center' });
-  doc.moveDown();
-  doc.fontSize(14).text(`Date: ${receiptData.date.toLocaleString()}`);
-  doc.text(`Product: ${receiptData.title}`);
-  doc.text(`Amount: ${receiptData.amount} ${receiptData.currency}`);
-  doc.end();
 
-  doc.on('finish', () => {
-    console.log(`Receipt generated at ${filePath}`);
-    fs.unlinkSync(filePath); // Clean up the temporary file
-  });
-}

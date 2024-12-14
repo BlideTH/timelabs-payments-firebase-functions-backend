@@ -1,9 +1,9 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /paymentSignals/{signalId} {
-      allow read: if true; // Allow read access for now
-      allow write: if request.auth != null; // Only authenticated backends can write
+    match /paymentSignals/{docId} {
+      allow read: if request.auth.token.aud == 'timelabs-payments-app';
+      allow write: if request.auth.token.aud == 'timelabs-payments-app';
     }
   }
 }
