@@ -22,34 +22,43 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
       provider_token,
       currency,
       prices,
+      provider_data, // Use provider_data directly from the frontend
     } = req.body;
 
     // Validate input
-    if (!title || !description || !payload || !provider_token || !currency || !prices) {
+    if (!title || !description || !payload || !provider_token || !currency || !prices || !provider_data) {
       console.error('Missing required fields in request body:', req.body);
       return res.status(400).json({ message: 'Missing required fields in request body.' });
     }
 
+    // Validate provider_data structure
+    try {
+      const parsedProviderData = typeof provider_data === 'string' ? JSON.parse(provider_data) : provider_data;
+      if (!parsedProviderData.receipt || !parsedProviderData.receipt.items) {
+        throw new Error('Invalid provider_data: Missing receipt or items');
+      }
+    } catch (error) {
+      console.error('Invalid provider_data format:', provider_data, error);
+      return res.status(400).json({ message: 'Invalid provider_data format.' });
+    }
+
+    // Prepare the payload for Telegram API
     const createInvoiceLinkUrl = `https://api.telegram.org/bot${botToken}/createInvoiceLink`;
+    const invoicePayload = {
+      title,
+      description,
+      payload,
+      provider_token,
+      currency,
+      prices,
+      provider_data: typeof provider_data === 'string' ? provider_data : JSON.stringify(provider_data), // Ensure JSON string
+    };
 
     try {
-      console.log('Sending payload to Telegram API:', {
-        title,
-        description,
-        payload,
-        provider_token,
-        currency,
-        prices,
-      });
+      console.log('Sending payload to Telegram API:', invoicePayload);
 
-      const response = await axios.post(createInvoiceLinkUrl, {
-        title,
-        description,
-        payload,
-        provider_token,
-        currency,
-        prices,
-      });
+      // Send the payload to Telegram's API
+      const response = await axios.post(createInvoiceLinkUrl, invoicePayload);
 
       if (response.data.ok) {
         const invoiceLink = response.data.result;
@@ -73,10 +82,6 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
     }
   });
 });
-
-
-
-
 
 // Cloud function to handle webhook updates from Telegram
 exports.webhook = functions.https.onRequest(async (req, res) => {
@@ -130,7 +135,3 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
 
   res.status(200).send('Webhook received');
 });
-
-
-
-
