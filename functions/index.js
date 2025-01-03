@@ -12,6 +12,78 @@ admin.initializeApp({
 const db = admin.firestore();
 const botToken = functions.config().telegram.bot_token;
 
+// WooCommerce API Integration
+const wooCommerceBaseURL = 'https://payments.timelabs.su/wp-json/wc/v3';
+const consumerKey = 'ck_36e711a64d6b3aa9f11617e7b81c8b3c4792826b';
+const consumerSecret = 'cs_b237028e1e0b096b29456249feee56fb69faa7c9';
+
+async function syncProductsToFirestore() {
+  try {
+    const response = await axios.get(`${wooCommerceBaseURL}/products?per_page=50`, {
+      auth: {
+        username: consumerKey,
+        password: consumerSecret,
+      }
+    });
+
+    const products = response.data;
+
+    const batch = db.batch();
+    products.forEach((product) => {
+      const productRef = db.collection('products').doc(product.id.toString());
+      batch.set(productRef, {
+        id: product.id,
+        name: product.name,
+        description: product.description.replace(/<[^>]*>?/gm, ''), // Remove HTML tags
+        price: parseFloat(product.price) || 0,
+        categories: product.categories.map((cat) => cat.name),
+        image: product.images?.[0]?.src || '',
+        link: product.permalink,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    await batch.commit();
+    console.log('Products synced to Firestore successfully!');
+  } catch (error) {
+    console.error('Error syncing products to Firestore:', error);
+  }
+}
+
+// Function to fetch products from WooCommerce
+exports.getWooCommerceProducts = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const productsSnapshot = await db.collection('products').get();
+      const products = productsSnapshot.docs.map((doc) => doc.data());
+      res.status(200).json({ products });
+    } catch (error) {
+      console.error('Error fetching products from Firestore:', error);
+      res.status(500).json({ message: 'Failed to fetch products.' });
+    }
+  });
+});
+
+exports.manualSyncProducts = functions.https.onRequest((req, res) => {
+  syncProductsToFirestore()
+    .then(() => res.status(200).json({ message: 'Products synced successfully' }))
+    .catch((error) => res.status(500).json({ message: error.message }));
+});
+
+
+// Scheduled function to sync products to Firestore
+exports.scheduledSyncProducts = functions.pubsub.schedule('every 12 hours').onRun(async () => {
+  console.log('Scheduled sync started...');
+  try {
+    await syncProductsToFirestore();
+    console.log('Scheduled sync completed.');
+  } catch (error) {
+    console.error('Error during scheduled sync:', error);
+  }
+});
+
+
+
 // Cloud function to handle creating invoice links
 exports.createInvoiceLink = functions.https.onRequest((req, res) => {
   cors(req, res, async () => {
@@ -22,42 +94,46 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
       provider_token,
       currency,
       prices,
-      provider_data, // Use provider_data directly from the frontend
+      provider_data,
+      email,
+      telegram_user_id,
+      telegram_username,
+      device_info,
     } = req.body;
 
     // Validate input
-    if (!title || !description || !payload || !provider_token || !currency || !prices || !provider_data) {
+    if (
+      !title ||
+      !description ||
+      !payload ||
+      !provider_token ||
+      !currency ||
+      !prices ||
+      !provider_data ||
+      !email ||
+      !telegram_user_id
+    ) {
       console.error('Missing required fields in request body:', req.body);
       return res.status(400).json({ message: 'Missing required fields in request body.' });
     }
 
-    // Validate provider_data structure
-    try {
-      const parsedProviderData = typeof provider_data === 'string' ? JSON.parse(provider_data) : provider_data;
-      if (!parsedProviderData.receipt || !parsedProviderData.receipt.items) {
-        throw new Error('Invalid provider_data: Missing receipt or items');
-      }
-    } catch (error) {
-      console.error('Invalid provider_data format:', provider_data, error);
-      return res.status(400).json({ message: 'Invalid provider_data format.' });
-    }
+    // Generate an order ID
+    const orderId = `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // Prepare the payload for Telegram API
     const createInvoiceLinkUrl = `https://api.telegram.org/bot${botToken}/createInvoiceLink`;
     const invoicePayload = {
       title,
       description,
-      payload,
+      payload: orderId, // Use the generated order ID as the payload
       provider_token,
       currency,
       prices,
-      provider_data: typeof provider_data === 'string' ? provider_data : JSON.stringify(provider_data), // Ensure JSON string
+      provider_data: typeof provider_data === 'string' ? provider_data : JSON.stringify(provider_data),
     };
 
     try {
       console.log('Sending payload to Telegram API:', invoicePayload);
 
-      // Send the payload to Telegram's API
       const response = await axios.post(createInvoiceLinkUrl, invoicePayload);
 
       if (response.data.ok) {
@@ -65,9 +141,24 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
 
         console.log('Telegram API response:', response.data);
 
+        // Save order details for tracking/debugging
+        const orderDetails = {
+          order_id: orderId,
+          product_name: title,
+          email,
+          telegram_user_id,
+          telegram_username: telegram_username || 'Unknown',
+          device_info: device_info || 'Unknown',
+          prices,
+          provider_data,
+          created_at: new Date(),
+        };
+        await db.collection('orderLogs').add(orderDetails);
+
         res.status(200).json({
           message: 'Invoice link created successfully',
           invoice_link: invoiceLink,
+          order_id: orderId,
         });
       } else {
         console.error('Telegram API error:', {
@@ -82,6 +173,8 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
     }
   });
 });
+
+
 
 // Cloud function to handle webhook updates from Telegram
 exports.webhook = functions.https.onRequest(async (req, res) => {
@@ -119,6 +212,12 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
 
     const signal = {
       chat_id: chatId,
+      telegram_user_id: req.body.telegram_user_id || null,
+      telegram_username: req.body.telegram_username || 'Unknown',
+      email: req.body.email || null,
+      order_id: paymentInfo.invoice_payload || 'Unknown',
+      product_name: paymentInfo.description || 'Unknown',
+      device_info: req.body.device_info || 'Unknown',
       status: 'paid',
       amount: paymentInfo.total_amount / 100,
       currency: paymentInfo.currency,
@@ -135,3 +234,5 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
 
   res.status(200).send('Webhook received');
 });
+
+
