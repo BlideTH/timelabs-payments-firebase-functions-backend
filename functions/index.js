@@ -44,9 +44,36 @@ async function syncProductsToFirestore() {
     });
 
     await batch.commit();
-    console.log('Products synced to Firestore successfully!');
+    console.log('Products synced to Firestore successfully!');    
+
+  // Sync categories
+    const categoryResponse = await axios.get(`${wooCommerceBaseURL}/products/categories`, {
+      auth: {
+        username: consumerKey,
+        password: consumerSecret,
+      },
+    });
+
+    const categories = categoryResponse.data;
+
+    const categoryBatch = db.batch();
+    categories.forEach((category) => {
+      const categoryRef = db.collection('categories').doc(category.id.toString());
+      categoryBatch.set(categoryRef, {
+        id: category.id,
+        name: category.name,
+        slug: category.slug,
+        description: category.description || '',
+        order: category.menu_order || 0,
+        count: category.count || 0,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    await categoryBatch.commit();
+    console.log('Categories synced to Firestore successfully!');
   } catch (error) {
-    console.error('Error syncing products to Firestore:', error);
+    console.error('Error syncing products and categories to Firestore:', error);
   }
 }
 
