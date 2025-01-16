@@ -148,15 +148,17 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
       provider_token,
       currency,
       prices,
+      need_email,
+      send_email_to_provider,
       provider_data,
-      email,
+  //    email,
       telegram_user_id,
       telegram_username,
       device_info,
     } = req.body;
 
     // Validate input
-    if (
+  /*  if (
       !title ||
       !description ||
       !payload ||
@@ -164,26 +166,31 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
       !currency ||
       !prices ||
       !provider_data ||
-      !email ||
+ //     !email ||
       !telegram_user_id
     ) {
       console.error('Missing required fields in request body:', req.body);
       return res.status(400).json({ message: 'Missing required fields in request body.' });
-    }
+    } */
 
     // Generate an order ID
-    const orderId = `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  //  const orderId = `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     const createInvoiceLinkUrl = `https://api.telegram.org/bot${botToken}/createInvoiceLink`;
     const invoicePayload = {
       title,
       description,
-      payload: orderId, // Use the generated order ID as the payload
+      payload,
+    //  payload: orderId, // Use the generated order ID as the payload
+      need_email,
+      send_email_to_provider,
       provider_token,
       currency,
       prices,
       provider_data: typeof provider_data === 'string' ? provider_data : JSON.stringify(provider_data),
     };
+
+    console.log('Payload to Telegram:', invoicePayload);
 
     try {
       console.log('Sending payload to Telegram API:', invoicePayload);
