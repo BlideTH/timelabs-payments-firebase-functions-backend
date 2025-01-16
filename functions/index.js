@@ -77,6 +77,33 @@ async function syncProductsToFirestore() {
   }
 }
 
+exports.generateTimeslots = functions.pubsub.schedule('every 24 hours').onRun(async () => {
+  const specialistsSnapshot = await db.collection('specialists').get();
+  const today = new Date();
+
+  specialistsSnapshot.forEach(async (doc) => {
+    const specialist = doc.data();
+    const availability = { ...specialist.availability };
+
+    // Generate slots for the next 30 days
+    for (let i = 1; i <= 30; i++) {
+      const date = new Date(today);
+      date.setDate(today.getDate() + i);
+      const dateKey = date.toISOString().split('T')[0];
+
+      if (!availability[dateKey]) {
+        // Example timeslots; customize as needed
+        availability[dateKey] = ['10:00', '12:00', '14:00', '16:00'];
+      }
+    }
+
+    // Update specialist's availability
+    await doc.ref.update({ availability });
+  });
+
+  console.log('Timeslots generated successfully.');
+});
+
 // Function to fetch products from WooCommerce
 exports.getWooCommerceProducts = functions.https.onRequest((req, res) => {
   cors(req, res, async () => {
@@ -99,7 +126,7 @@ exports.manualSyncProducts = functions.https.onRequest((req, res) => {
 
 
 // Scheduled function to sync products to Firestore
-exports.scheduledSyncProducts = functions.pubsub.schedule('every 12 hours').onRun(async () => {
+exports.scheduledSyncProducts = functions.pubsub.schedule('every 10 minutes').onRun(async () => {
   console.log('Scheduled sync started...');
   try {
     await syncProductsToFirestore();
@@ -240,11 +267,11 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
     const signal = {
       chat_id: chatId,
       telegram_user_id: req.body.telegram_user_id || null,
-      telegram_username: req.body.telegram_username || 'Unknown',
-      email: req.body.email || null,
+      telegram_username: paymentInfo.telegram_username || 'Unknown',
+      email: paymentInfo.email || null,
       order_id: paymentInfo.invoice_payload || 'Unknown',
       product_name: paymentInfo.description || 'Unknown',
-      device_info: req.body.device_info || 'Unknown',
+      device_info: paymentInfo.device_info || 'Unknown',
       status: 'paid',
       amount: paymentInfo.total_amount / 100,
       currency: paymentInfo.currency,
@@ -258,6 +285,22 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
       console.error('Error writing payment signal to Firestore:', error.message);
     }
   }
+  // Retrieve booking details from payload
+  const payload = JSON.parse(paymentInfo.invoice_payload);
+  const bookingDetails = payload.bookingDetails;
+
+  // Send confirmation message
+  await axios.post(
+    `https://api.telegram.org/bot${botToken}/sendMessage`,
+    {
+      chat_id: chatId,
+      text: `Спасибо за оплату! Вы забронировали консультацию:\n\n` +
+            `Специалист: ${bookingDetails.specialistId || 'Не указан'}\n` +
+            `Дата: ${bookingDetails.date || 'Не указана'}\n` +
+            `Время: ${bookingDetails.time || 'Не указано'}\n\n` +
+            `Скоро с вами свяжутся для подтверждения!`,
+    }
+  );
 
   res.status(200).send('Webhook received');
 });
