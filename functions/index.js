@@ -77,6 +77,66 @@ async function syncProductsToFirestore() {
   }
 }
 
+// Firebase Function (backend)
+const syncCouponsToFirestore = async () => {
+  try {
+    // Fetch coupons from WooCommerce API
+    const response = await axios.get(`${wooCommerceBaseURL}/coupons?per_page=50`, {
+      auth: { username: consumerKey, password: consumerSecret }
+    });
+
+    const coupons = response.data;
+
+    // Batch write to Firestore
+    const batch = db.batch();
+    coupons.forEach((coupon) => {
+      const couponRef = db.collection('coupons').doc(coupon.code); // Use coupon code as the document ID
+      batch.set(couponRef, {
+        code: coupon.code,
+        discountType: coupon.discount_type, // e.g., "percent" or "fixed_cart"
+        amount: parseFloat(coupon.amount),
+        usageLimit: coupon.usage_limit || 0,
+        usedCount: coupon.usage_count || 0,
+        expiryDate: coupon.date_expires || null,
+        productIds: coupon.product_ids || [],
+        status: coupon.status === "publish" ? "active" : "expired"
+      });
+    });
+
+    await batch.commit();
+    console.log('Coupons synced to Firestore!');
+  } catch (error) {
+    console.error('Error syncing coupons:', error);
+  }
+};
+
+// Trigger this function periodically (e.g., every 1 hour)
+exports.scheduledSyncCoupons = functions.pubsub.schedule('every 1 hour').onRun(async () => {
+  await syncCouponsToFirestore();
+});
+
+// Firebase Function (backend)
+exports.syncCouponUsageToWordPress = functions.firestore
+  .document('coupons/{couponCode}')
+  .onUpdate(async (change, context) => {
+    const newData = change.after.data();
+    const oldData = change.before.data();
+
+    // Only trigger if usedCount changed
+    if (newData.usedCount === oldData.usedCount) return;
+
+    try {
+      await axios.put(
+        `${wooCommerceBaseURL}/coupons/${context.params.couponCode}`,
+        { usage_count: newData.usedCount },
+        { auth: { username: consumerKey, password: consumerSecret } }
+      );
+      console.log(`Coupon ${context.params.couponCode} usage synced to WordPress.`);
+    } catch (error) {
+      console.error('Error syncing coupon usage:', error);
+    }
+  });
+
 exports.generateTimeslots = functions.pubsub.schedule('every 24 hours').onRun(async () => {
   const specialistsSnapshot = await db.collection('specialists').get();
   const today = new Date();
@@ -121,6 +181,12 @@ exports.getWooCommerceProducts = functions.https.onRequest((req, res) => {
 exports.manualSyncProducts = functions.https.onRequest((req, res) => {
   syncProductsToFirestore()
     .then(() => res.status(200).json({ message: 'Products synced successfully' }))
+    .catch((error) => res.status(500).json({ message: error.message }));
+});
+
+exports.manualSyncCoupons = functions.https.onRequest((req, res) => {
+  syncCouponsToFirestore()
+    .then(() => res.status(200).json({ message: 'Coupons synced successfully' }))
     .catch((error) => res.status(500).json({ message: error.message }));
 });
 
