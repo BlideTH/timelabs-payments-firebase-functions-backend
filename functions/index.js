@@ -214,7 +214,7 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
         res.status(200).json({
           message: 'Invoice link created successfully',
           invoice_link: invoiceLink,
-          order_id: orderId,
+          order_id: payload,
         });
       } else {
         console.error('Telegram API error:', {
@@ -259,19 +259,22 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
 
   if (update.message?.successful_payment) {
     const paymentInfo = update.message.successful_payment;
-    const chatId = update.message.chat.id;
-
-    if (!paymentInfo || !chatId) {
-      console.error('Missing payment information or chat ID:', update.message);
-      return res.status(400).send('Missing payment information or chat ID.');
+    
+    let payload;
+    try {
+      payload = JSON.parse(paymentInfo.invoice_payload);
+      console.log('Parsed payload:', payload); // Debugging
+    } catch (error) {
+      console.error('Error parsing invoice_payload:', error.message);
+      return res.status(400).send('Invalid invoice_payload format.');
     }
 
     const signal = {
       chat_id: chatId,
-      telegram_user_id: req.body.telegram_user_id || null,
-      telegram_username: paymentInfo.telegram_username || 'Unknown',
+      telegram_user_id: update.message.from?.id || null,
+      telegram_username: update.message.from?.username || 'Unknown',
       email: paymentInfo.email || null,
-      order_id: paymentInfo.invoice_payload || 'Unknown',
+      order_id: payload.orderId,
       product_name: paymentInfo.description || 'Unknown',
       device_info: paymentInfo.device_info || 'Unknown',
       status: 'paid',
@@ -280,29 +283,34 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
       date: new Date(),
     };
 
-    try {
-      await db.collection('paymentSignals').add(signal);
-      console.log('Payment signal written to Firestore:', signal);
-    } catch (error) {
-      console.error('Error writing payment signal to Firestore:', error.message);
+    if (signal.status === 'paid' && signal.order_id && signal.amount) {
+      try {
+        await db.collection('paymentSignals').add(signal);
+        console.log('Payment signal written to Firestore:', signal);
+      } catch (error) {
+        console.error('Error writing payment signal to Firestore:', error.message);
+      }
+    } else {
+      console.warn('Skipped writing signal due to missing or invalid data:', signal);
     }
+  
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      {
+        chat_id: chatId,
+        text: `Спасибо за оплату! Вы забронировали консультацию:\n\n` +
+              `Специалист: ${payload.bookingDetails?.specialistId || 'Не указан'}\n` +
+              `Дата: ${payload.bookingDetails?.date || 'Не указана'}\n` +
+              `Время: ${payload.bookingDetails?.time || 'Не указано'}\n\n` +
+              `Скоро с вами свяжутся для подтверждения!`,
+      }
+    );
+    console.log('Confirmation message sent successfully.');
+  } catch (error) {
+    console.error('Error sending confirmation message:', error.message);
   }
-  // Retrieve booking details from payload
-  const payload = JSON.parse(paymentInfo.invoice_payload);
-  const bookingDetails = payload.bookingDetails;
-
-  // Send confirmation message
-  await axios.post(
-    `https://api.telegram.org/bot${botToken}/sendMessage`,
-    {
-      chat_id: chatId,
-      text: `Спасибо за оплату! Вы забронировали консультацию:\n\n` +
-            `Специалист: ${bookingDetails.specialistId || 'Не указан'}\n` +
-            `Дата: ${bookingDetails.date || 'Не указана'}\n` +
-            `Время: ${bookingDetails.time || 'Не указано'}\n\n` +
-            `Скоро с вами свяжутся для подтверждения!`,
-    }
-  );
+}
 
   res.status(200).send('Webhook received');
 });
