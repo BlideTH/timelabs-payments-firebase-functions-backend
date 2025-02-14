@@ -238,14 +238,22 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
       return res.status(400).json({ message: 'Missing required fields in request body.' });
     } 
 
-    // Generate an order ID
-    const orderId = `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    // Parse the payload to extract the orderId
+    let frontendPayload;
+    try {
+      frontendPayload = JSON.parse(payload);
+    } catch (error) {
+      console.error('Invalid payload format:', error);
+      return res.status(400).json({ message: 'Payload must be a JSON string.' });
+    }
+
+    const orderId = frontendPayload.orderId; // ✅ Use the frontend's orderId
 
     const createInvoiceLinkUrl = `https://api.telegram.org/bot${botToken}/createInvoiceLink`;
     const invoicePayload = {
       title,
       description,      
-      payload: orderId, // Use the generated order ID as the payload
+      payload: payload, // Use the generated order ID as the payload
       email,
       provider_token,
       currency,
@@ -280,7 +288,7 @@ exports.createInvoiceLink = functions.https.onRequest((req, res) => {
         res.status(200).json({
           message: 'Invoice link created successfully',
           invoice_link: invoiceLink,
-          order_id: payload,
+          order_id: orderId,
         });
       } else {
         console.error('Telegram API error:', {
@@ -325,6 +333,7 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
 
   if (update.message?.successful_payment) {
     const paymentInfo = update.message.successful_payment;
+    const chatId = update.message.chat.id;
     
     let payload;
     try {
@@ -335,21 +344,23 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
       return res.status(400).send('Invalid invoice_payload format.');
     }
 
+    const orderId = payload.orderId; // ✅ Use the same orderId from the frontend
+
     const signal = {
       chat_id: chatId,
       telegram_user_id: update.message.from?.id || null,
       telegram_username: update.message.from?.username || 'Unknown',
-      email: paymentInfo.email || null,
-      order_id: payload.orderId,
-      product_name: paymentInfo.description || 'Unknown',
-      device_info: paymentInfo.device_info || 'Unknown',
+      email: update.message.from?.email || null,
+      order_id: orderId,
+      product_name: update.message.from?.description || 'Unknown',
+      device_info: update.message.from?.device_info || 'Unknown',
       status: 'paid',
       amount: paymentInfo.total_amount / 100,
       currency: paymentInfo.currency,
       date: new Date(),
     };
 
-    if (signal.status === 'paid' && signal.order_id && signal.amount) {
+ /*   if (signal.status === 'paid' && signal.order_id && signal.amount) {
       try {
         await db.collection('paymentSignals').add(signal);
         console.log('Payment signal written to Firestore:', signal);
@@ -358,7 +369,19 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
       }
     } else {
       console.warn('Skipped writing signal due to missing or invalid data:', signal);
-    }
+    } */
+
+          // Use a transaction to prevent duplicates
+    await db.runTransaction(async (transaction) => {
+      const signalRef = db.collection('paymentSignals').doc(orderId);
+      const doc = await transaction.get(signalRef);
+
+      if (!doc.exists) {
+        transaction.set(signalRef, signal);
+        console.log('Payment signal written:', signal);
+      }
+    });
+  
   
   try {
     await axios.post(
@@ -366,9 +389,9 @@ exports.webhook = functions.https.onRequest(async (req, res) => {
       {
         chat_id: chatId,
         text: `Спасибо за оплату! Вы забронировали консультацию:\n\n` +
-              `Специалист: ${payload.bookingDetails?.specialistId || 'Не указан'}\n` +
-              `Дата: ${payload.bookingDetails?.date || 'Не указана'}\n` +
-              `Время: ${payload.bookingDetails?.time || 'Не указано'}\n\n` +
+              `Специалист: ${paymentData.bookingDetails?.specialistName || 'Не указан'}\n` +
+              `Дата: ${paymentData.bookingDetails?.date || 'Не указана'}\n` +
+              `Время: ${paymentData.bookingDetails?.time || 'Не указано'}\n\n` +
               `Скоро с вами свяжутся для подтверждения!`,
       }
     );
